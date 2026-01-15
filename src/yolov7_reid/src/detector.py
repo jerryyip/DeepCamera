@@ -11,7 +11,7 @@ from pymilvus import (connections, CollectionSchema,
 import redis
 import numpy as np
 import cv2
-import onnxruntime
+from hailo_inference import HailoInferenceSession
 
 from flask import Flask
 from flask import request
@@ -20,18 +20,18 @@ from YOLOv7 import YOLOv7
 from LabelStudioClient import LabelStudioClient
 from telegram_bot import TelegramBot
 
-model_path = "models/yolov7-tiny_480x640.onnx"
+model_path = "models/yolov7-tiny_480x640.hef"
 yolov7_detector = YOLOv7(model_path, conf_thres=0.6, iou_thres=0.5)
 full_screen = True
 app = Flask(__name__)
 q = queue.Queue(1)
 def get_parser():
-    parser = argparse.ArgumentParser(description="onnx model inference")
+    parser = argparse.ArgumentParser(description="hailo model inference")
 
     parser.add_argument(
         "--model-path",
-        default="./models/mgn_R50-ibn.onnx",
-        help="onnx model path"
+        default="./models/mgn_R50-ibn.hef",
+        help="hailo hef model path"
     )
     parser.add_argument(
         "--height",
@@ -67,13 +67,17 @@ def init_milvus(collection_name, dim):
     collection.load()
     
     return collection, red
-def preprocess(original_image, image_height, image_width):
+def preprocess(original_image, image_height, image_width, layout="NCHW"):
     # the model expects RGB inputs
     original_image = original_image[:, :, ::-1]
 
     # Apply pre-processing to image.
     img = cv2.resize(original_image, (image_width, image_height), interpolation=cv2.INTER_CUBIC)
-    img = img.astype("float32").transpose(2, 0, 1)[np.newaxis]  # (1, 3, h, w)
+    img = img.astype("float32")
+    if layout == "NCHW":
+        img = img.transpose(2, 0, 1)[np.newaxis]  # (1, 3, h, w)
+    else:
+        img = img[np.newaxis]  # (1, h, w, 3)
     return img
 def normalize(nparray, order=2, axis=-1):
     """Normalize a N-D numpy array along the specified axis."""
@@ -82,18 +86,13 @@ def normalize(nparray, order=2, axis=-1):
 
 args = get_parser().parse_args()
 
-JETPACK_VERSION = os.getenv('JETPACK_VERSION', None)
-
-providers=['CPUExecutionProvider']
-if JETPACK_VERSION == None:
-    providers=['CPUExecutionProvider']
-elif JETPACK_VERSION == '4':
-    providers=['CPUExecutionProvider']
-elif JETPACK_VERSION == '5.0':
-    providers=['CUDAExecutionProvider']
-
-ort_sess = onnxruntime.InferenceSession(args.model_path, providers = providers )
-input_name = ort_sess.get_inputs()[0].name
+ort_sess = HailoInferenceSession(args.model_path)
+input_info = ort_sess.get_inputs()[0]
+input_name = input_info.name
+if input_info.shape and len(input_info.shape) == 4 and input_info.shape[1] in (1, 3):
+    input_layout = "NCHW"
+else:
+    input_layout = "NHWC"
 
 while True:
     try:
@@ -155,7 +154,7 @@ def detection_with_image(frame, display_in_queue=True):
         for img in cropped_imgs:
             try:
                 print('crop image for person shape')
-                image = preprocess(img, args.height, args.width)
+                image = preprocess(img, args.height, args.width, layout=input_layout)
             except Exception as e:
                 print('cant preprocess img')
                 print(e)
