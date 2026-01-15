@@ -1,7 +1,7 @@
 import time
 import cv2
 import numpy as np
-import onnxruntime
+from hailo_inference import HailoInferenceSession
 
 from .utils import xywh2xyxy, nms, draw_detections, crop_class, draw_detections_with_predefined_colors
 
@@ -19,12 +19,7 @@ class YOLOv7:
         return self.detect_objects(image)
 
     def initialize_model(self, path):
-        try:
-            self.session = onnxruntime.InferenceSession(path,
-                                                    providers=['CUDAExecutionProvider'])
-        except Exception as e:
-            self.session = onnxruntime.InferenceSession(path,
-                                                    providers=['CPUExecutionProvider'])
+        self.session = HailoInferenceSession(path)
         # Get model info
         self.get_input_details()
         self.get_output_details()
@@ -57,8 +52,11 @@ class YOLOv7:
 
         # Scale input pixel values to 0 to 1
         input_img = input_img / 255.0
-        input_img = input_img.transpose(2, 0, 1)
-        input_tensor = input_img[np.newaxis, :, :, :].astype(np.float32)
+        if self.input_layout == "NCHW":
+            input_img = input_img.transpose(2, 0, 1)
+            input_tensor = input_img[np.newaxis, :, :, :].astype(np.float32)
+        else:
+            input_tensor = input_img[np.newaxis, :, :, :].astype(np.float32)
 
         return input_tensor
 
@@ -164,8 +162,16 @@ class YOLOv7:
         self.input_names = [model_inputs[i].name for i in range(len(model_inputs))]
 
         self.input_shape = model_inputs[0].shape
-        self.input_height = self.input_shape[2]
-        self.input_width = self.input_shape[3]
+        if self.input_shape is None or len(self.input_shape) != 4:
+            raise ValueError("Unable to determine input shape from Hailo model metadata.")
+        if self.input_shape[1] in (1, 3):
+            self.input_layout = "NCHW"
+            self.input_height = self.input_shape[2]
+            self.input_width = self.input_shape[3]
+        else:
+            self.input_layout = "NHWC"
+            self.input_height = self.input_shape[1]
+            self.input_width = self.input_shape[2]
 
     def get_output_details(self):
         model_outputs = self.session.get_outputs()
@@ -175,7 +181,7 @@ class YOLOv7:
 if __name__ == '__main__':
     from imread_from_url import imread_from_url
 
-    model_path = "../models/yolov7_736x1280.onnx"
+    model_path = "../models/yolov7_736x1280.hef"
 
     # Initialize YOLOv7 object detector
     yolov7_detector = YOLOv7(model_path, conf_thres=0.3, iou_thres=0.5)
